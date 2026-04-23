@@ -1,46 +1,59 @@
 # Smeta App
 
-Smeta App is a business tool for preparing estimates, commercial offers, and equipment selections.
+Smeta App - это рабочий инструмент для составления смет, коммерческих предложений и подбора оборудования.
 
-## What it does
+## Что умеет проект
 
-- manages estimates with branching and access sharing
-- keeps equipment, installation, and commissioning items in separate sections
-- supports AI-assisted estimate creation and editing
-- imports price lists from Excel, PDF, and supplier pages
-- exports estimates to Excel and PDF
-- includes authentication, admin access, and user permissions
+- создавать сметы и ветки смет
+- разделять позиции на оборудование, монтажные и пусконаладочные работы
+- автоматически подбирать монтаж и пусконаладку по оборудованию
+- импортировать прайсы из Excel, PDF и со страниц поставщиков
+- экспортировать сметы в Excel и PDF
+- работать с авторизацией, ролями пользователей и правами доступа
+- поддерживать AI-ассистента для создания и дополнения смет
 
-## Stack
+## Технологии
 
 - Frontend: React
 - Backend: FastAPI
-- Database: SQLite, ready to move to PostgreSQL later
+- База данных: SQLite, с возможностью перейти на PostgreSQL
 
-## Main features
+## Основные возможности
 
-- estimate tree with base estimates and branches
-- per-section percent adjustments and tax modes
-- automatic matching of installation and commissioning works
-- admin panel for AI settings, users, and access control
-- audit log for AI actions and system responses
+- дерево смет: базовая смета и ветки-версии
+- корректировки по разделам в процентах
+- режимы налогообложения
+- лог действий AI и ответов системы
+- админ-панель для настроек AI, пользователей и доступа
+- экспортные шаблоны, пригодные для клиента
 
-## Local run
+## Запуск локально
 
-Backend:
+### Backend
 
 ```powershell
 cd backend
 venv\Scripts\python.exe -m uvicorn app:app --host 127.0.0.1 --port 8000
 ```
 
-Frontend:
+### Frontend
 
 ```powershell
 cd frontend
 npm start
 ```
 
-## Notes
+## Админ
 
-The project is under active development. The current codebase includes AI workflows, estimate branching, export templates, and admin-level controls for system behavior.
+В проекте предусмотрен скрытый администратор и отдельные права для управления пользователями, сметами и AI-настройками.
+
+## Статус проекта
+
+Проект активно развивается. В текущей версии уже есть:
+
+- AI-помощник для смет
+- автодобавление монтажных и пусконаладочных работ
+- экспорт в Excel и PDF
+- многопользовательская работа с доступами
+- журнал действий AI
+
