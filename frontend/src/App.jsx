@@ -43,6 +43,8 @@ function App() {
   const [currentUser, setCurrentUser] = useState(null);
   const [loginForm, setLoginForm] = useState({ email: "", password: "" });
   const [authMode, setAuthMode] = useState("login");
+  const [activePage, setActivePage] = useState("smetas");
+  const [theme, setTheme] = useState(() => localStorage.getItem("smeta_theme") || "dark");
   const [materials, setMaterials] = useState([]);
   const [smetas, setSmetas] = useState([]);
   const [sections, setSections] = useState(DEFAULT_SECTIONS);
@@ -65,6 +67,8 @@ function App() {
   const [adminBusy, setAdminBusy] = useState(false);
   const [materialForm, setMaterialForm] = useState(emptyMaterial);
   const [itemForm, setItemForm] = useState(emptyItem);
+  const [itemDrafts, setItemDrafts] = useState({});
+  const [itemSuggestions, setItemSuggestions] = useState([]);
   const [quantityByMaterial, setQuantityByMaterial] = useState({});
   const [expandedItems, setExpandedItems] = useState({});
   const [aiSettings, setAiSettings] = useState({
@@ -93,6 +97,12 @@ function App() {
       localStorage.removeItem("smeta_token");
     }
   }, [authToken]);
+
+  useEffect(() => {
+    document.body.classList.toggle("theme-dark", theme === "dark");
+    document.body.classList.toggle("theme-light", theme === "light");
+    localStorage.setItem("smeta_theme", theme);
+  }, [theme]);
 
   const wholeQuantityInput = (value) => {
     const digits = String(value || "").replace(/\D/g, "");
@@ -145,6 +155,12 @@ function App() {
   }, [authToken, currentUser?.is_admin]);
 
   useEffect(() => {
+    if (activePage === "admin" && !currentUser?.is_admin) {
+      setActivePage("smetas");
+    }
+  }, [activePage, currentUser?.is_admin]);
+
+  useEffect(() => {
     if (!authToken || !selectedSmetaId) {
       return;
     }
@@ -159,6 +175,33 @@ function App() {
     }, 220);
     return () => clearTimeout(timer);
   }, [authToken, materialQuery, materialType, technologyFilter, megapixelsFilter, priceToFilter]);
+
+  useEffect(() => {
+    if (!authToken || activePage !== "smetas") {
+      setItemSuggestions([]);
+      return undefined;
+    }
+    const query = itemForm.name.trim();
+    if (query.length < 2) {
+      setItemSuggestions([]);
+      return undefined;
+    }
+    const timer = setTimeout(async () => {
+      try {
+        const res = await axios.get(`${API_URL}/materials`, {
+          params: {
+            q: query,
+            item_type: "all",
+            limit: 8,
+          },
+        });
+        setItemSuggestions(res.data || []);
+      } catch (err) {
+        setItemSuggestions([]);
+      }
+    }, 180);
+    return () => clearTimeout(timer);
+  }, [authToken, activePage, itemForm.name]);
 
   useEffect(() => {
     if (selectedSmeta) {
@@ -178,6 +221,7 @@ function App() {
     } else {
       setSmetaDetails(emptySmetaDetails);
     }
+    setItemDrafts({});
   }, [selectedSmetaId]);
 
   const refreshData = async () => {
@@ -643,7 +687,33 @@ function App() {
         { params: { material_id: material.id } }
       );
       updateSelectedSmeta(res.data);
-    }, "Позиция добавлена в смету");
+    }, materialAddText(material));
+  };
+
+  const handleAddSuggestedItem = async (material) => {
+    if (!selectedSmeta) {
+      setError("Сначала создайте или выберите смету");
+      return;
+    }
+    const quantity = wholeQuantityValue(itemForm.quantity);
+    await runAction(async () => {
+      const res = await axios.post(
+        `${API_URL}/smetas/${selectedSmeta.id}/items`,
+        {
+          name: material.name,
+          characteristics: material.characteristics,
+          section: material.item_type === "work" ? "Монтажные работы" : "Оборудование",
+          unit: material.unit,
+          quantity,
+          unit_price: material.price,
+          source: material.source,
+        },
+        { params: { material_id: material.id } }
+      );
+      updateSelectedSmeta(res.data);
+      setItemForm(emptyItem);
+      setItemSuggestions([]);
+    }, materialAddText(material));
   };
 
   const handleAddCustomItem = async () => {
@@ -674,10 +744,8 @@ function App() {
   };
 
   const handleUpdateItemNumber = async (item, field, value) => {
-    if (value === "") {
-      return;
-    }
-    const numberValue = field === "quantity" ? wholeQuantityValue(value) : Number(value);
+    const normalizedValue = String(value ?? "").replace(",", ".").trim();
+    const numberValue = field === "quantity" ? wholeQuantityValue(normalizedValue) : Number(normalizedValue);
     if (!selectedSmeta || Number.isNaN(numberValue) || numberValue < 0) {
       return;
     }
@@ -696,6 +764,44 @@ function App() {
       updateSelectedSmeta(res.data);
       return "Позиция обновлена";
     }, "Позиция обновлена");
+  };
+
+  const updateItemDraft = (item, field, value) => {
+    setItemDrafts(current => ({
+      ...current,
+      [`${item.id}:${field}`]: value,
+    }));
+  };
+
+  const getItemDraft = (item, field, fallback) => {
+    const key = `${item.id}:${field}`;
+    return Object.prototype.hasOwnProperty.call(itemDrafts, key) ? itemDrafts[key] : fallback;
+  };
+
+  const clearItemDraft = (item, field) => {
+    const key = `${item.id}:${field}`;
+    setItemDrafts(current => {
+      if (!Object.prototype.hasOwnProperty.call(current, key)) {
+        return current;
+      }
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
+  };
+
+  const commitItemDraft = async (item, field) => {
+    const key = `${item.id}:${field}`;
+    if (!Object.prototype.hasOwnProperty.call(itemDrafts, key)) {
+      return;
+    }
+    const value = itemDrafts[key];
+    if (value === "") {
+      clearItemDraft(item, field);
+      return;
+    }
+    await handleUpdateItemNumber(item, field, value);
+    clearItemDraft(item, field);
   };
 
   const handleAiRequest = async () => {
@@ -721,6 +827,16 @@ function App() {
     currency: "RUB",
     maximumFractionDigits: 2,
   }).format(value || 0);
+
+  const hasManualPrice = (item) =>
+    item?.base_unit_price !== null &&
+    item?.base_unit_price !== undefined &&
+    Number(item?.unit_price || 0) !== Number(item?.base_unit_price || 0);
+
+  const isWorkMaterial = (material) => material?.item_type === "work";
+
+  const materialAddText = (material) =>
+    isWorkMaterial(material) ? "Работа добавлена в смету" : "Оборудование добавлено, монтаж и пусконаладка проверены";
 
   const updateMaterialForm = (field, value) => {
     setMaterialForm(current => ({ ...current, [field]: value }));
@@ -790,6 +906,12 @@ function App() {
     ];
   };
   const smetaTree = roots.flatMap(root => walkSmetaTree(root));
+  const pageItems = [
+    { id: "smetas", label: "Сметы", hint: selectedSmeta ? selectedSmeta.name : `${smetas.length} смет` },
+    { id: "prices", label: "Прайсы", hint: `${materials.length} позиций` },
+    { id: "assistant", label: "AI Ассистент", hint: selectedSmeta ? "работает с выбранной сметой" : "без выбранной сметы" },
+    ...(currentUser?.is_admin ? [{ id: "admin", label: "Админка", hint: `${adminUsers.length} пользователей` }] : []),
+  ];
 
   if (!authToken) {
     return (
@@ -846,7 +968,15 @@ function App() {
         <div className="total-box">
           <span>Итого по смете</span>
           <strong>{money(previewSmeta?.total || 0)}</strong>
-          <button className="ghost" onClick={handleLogout}>Выйти</button>
+          <div className="topbar-actions">
+            <button
+              className="ghost theme-toggle"
+              onClick={() => setTheme(current => current === "dark" ? "light" : "dark")}
+            >
+              {theme === "dark" ? "Светлая тема" : "Тёмная тема"}
+            </button>
+            <button className="ghost" onClick={handleLogout}>Выйти</button>
+          </div>
         </div>
       </header>
 
@@ -856,6 +986,20 @@ function App() {
         </div>
       )}
 
+      <nav className="page-nav" aria-label="Разделы приложения">
+        {pageItems.map(page => (
+          <button
+            key={page.id}
+            className={activePage === page.id ? "active" : ""}
+            onClick={() => setActivePage(page.id)}
+          >
+            <strong>{page.label}</strong>
+            <span>{page.hint}</span>
+          </button>
+        ))}
+      </nav>
+
+      {activePage === "smetas" && (
       <section className="workspace">
         <aside className="panel sidebar">
           <h2>Сметы</h2>
@@ -1064,6 +1208,14 @@ function App() {
                             ))}
                             {expandedItems[item.id] && <small>{item.characteristics || "Описание не заполнено"}</small>}
                             <em>{item.unit || "ед."} · {item.source || "без источника"}</em>
+                            {hasManualPrice(item) && (
+                              <span
+                                className="price-badge"
+                                title={`Цена из базы: ${money(item.base_unit_price)}`}
+                              >
+                                ручная цена
+                              </span>
+                            )}
                             {item.section_adjustment_percent !== 0 && (
                               <em>Цена с корректировкой раздела: {money(item.effective_unit_price)}</em>
                             )}
@@ -1072,21 +1224,22 @@ function App() {
                         <td>
                           <input
                             className="table-number"
-                            type="number"
-                            min="1"
-                            step="1"
-                            value={Math.round(item.quantity)}
-                            onChange={e => handleUpdateItemNumber(item, "quantity", e.target.value)}
+                            type="text"
+                            inputMode="numeric"
+                            pattern="[0-9]*"
+                            value={getItemDraft(item, "quantity", String(Math.round(item.quantity || 1)))}
+                            onChange={e => updateItemDraft(item, "quantity", e.target.value)}
+                            onBlur={() => commitItemDraft(item, "quantity")}
                           />
                         </td>
                         <td>
                           <input
                             className="table-number price"
-                            type="number"
-                            min="0"
-                            step="0.01"
-                            value={item.unit_price}
-                            onChange={e => handleUpdateItemNumber(item, "unit_price", e.target.value)}
+                            type="text"
+                            inputMode="decimal"
+                            value={getItemDraft(item, "unit_price", String(item.unit_price ?? 0))}
+                            onChange={e => updateItemDraft(item, "unit_price", e.target.value)}
+                            onBlur={() => commitItemDraft(item, "unit_price")}
                           />
                         </td>
                         <td>{money(item.total)}</td>
@@ -1153,10 +1306,38 @@ function App() {
             />
             <button onClick={handleAddCustomItem}>Добавить</button>
           </div>
+          {itemSuggestions.length > 0 && itemForm.name.trim().length >= 2 && (
+            <div className="inline-suggestions">
+              <div className="suggestions-header">
+                <strong>Найдено в базе</strong>
+                <span>Можно добавить сразу, без перехода в прайсы</span>
+              </div>
+              {itemSuggestions.map(material => (
+                <div key={material.id} className="suggestion-row">
+                  <div>
+                    <div className="suggestion-title">
+                      <strong>{material.name}</strong>
+                      <em>{isWorkMaterial(material) ? "работа" : "оборудование"}</em>
+                    </div>
+                    <span>
+                      {material.characteristics ? `${material.characteristics} · ` : ""}
+                      {material.unit || "ед."} · {material.source || "без источника"}
+                    </span>
+                  </div>
+                  <strong>{money(material.price)}</strong>
+                  <button className="ghost" onClick={() => handleAddSuggestedItem(material)}>
+                    {isWorkMaterial(material) ? "Вставить" : "Вставить + работы"}
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
         </section>
       </section>
+      )}
 
-      <section className="lower-grid">
+      {activePage === "prices" && (
+      <section className="page-content prices-page">
         <section className="panel">
           <div className="section-title">
             <div>
@@ -1321,15 +1502,22 @@ function App() {
                   }))}
                 />
                 <button className="ghost" onClick={() => handleAddMaterialToSmeta(material)}>
-                  В смету
+                  {isWorkMaterial(material) ? "В смету" : "В смету + работы"}
                 </button>
               </div>
             ))}
           </div>
         </section>
+      </section>
+      )}
 
+      {activePage === "assistant" && (
+      <section className="page-content assistant-page">
         <section className="panel assistant">
           <h2>AI Ассистент</h2>
+          {selectedSmeta && (
+            <p className="muted">Текущая смета: {selectedSmeta.name} · {money(previewSmeta?.total || 0)}</p>
+          )}
           <p className="muted">Настройки AI доступны только администратору.</p>
           <textarea
             placeholder="Например: создай смету 'СКУД офис', добавь монтажные работы 12 часов по 1800 или удали позицию #5"
@@ -1340,8 +1528,9 @@ function App() {
           {aiResponse && <div className="assistant-answer">{aiResponse}</div>}
         </section>
       </section>
+      )}
 
-      {currentUser?.is_admin && (
+      {activePage === "admin" && currentUser?.is_admin && (
         <section className="panel admin-settings-panel">
           <div className="section-title">
             <div>

@@ -190,7 +190,7 @@ def ensure_schema():
         tables = {
             "materials": ["characteristics", "item_type"],
             "works": ["characteristics"],
-            "smeta_items": ["characteristics", "section"],
+            "smeta_items": ["characteristics", "section", "base_unit_price"],
             "smetas": [
                 "parent_id",
                 "owner_id",
@@ -209,7 +209,8 @@ def ensure_schema():
             existing = {row[1] for row in conn.execute(text(f"PRAGMA table_info({table_name})"))}
             for column in columns:
                 if column not in existing:
-                    conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column} VARCHAR"))
+                    column_type = "FLOAT" if column in {"base_unit_price"} else "VARCHAR"
+                    conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column} {column_type}"))
         conn.execute(
             text(
                 "UPDATE materials SET item_type = CASE "
@@ -228,6 +229,12 @@ def ensure_schema():
                 "OR coalesce(name, '') LIKE 'Подключение %' "
                 "OR coalesce(name, '') LIKE 'Аренда вышки%' "
                 "THEN 'work' ELSE 'equipment' END"
+            )
+        )
+        conn.execute(
+            text(
+                "UPDATE smeta_items SET base_unit_price = unit_price "
+                "WHERE base_unit_price IS NULL"
             )
         )
 
@@ -533,6 +540,8 @@ def normalized_owner_id(smeta):
 
 def item_to_dict(item, smeta=None):
     price = effective_unit_price(item, smeta) if smeta else (item.unit_price or 0)
+    base_value = getattr(item, "base_unit_price", None)
+    base_price = float(base_value if base_value is not None else (item.unit_price or 0))
     return {
         "id": item.id,
         "item_type": item.item_type,
@@ -542,6 +551,7 @@ def item_to_dict(item, smeta=None):
         "unit": item.unit or "",
         "quantity": item.quantity,
         "unit_price": item.unit_price,
+        "base_unit_price": base_price,
         "effective_unit_price": price,
         "section_adjustment_percent": section_adjustment_percent(smeta, item.section or "Оборудование") if smeta else 0,
         "source": item.source or "",
@@ -1667,10 +1677,13 @@ def work_kind(item):
 
 
 def has_matching_work(items, equipment):
+    equipment_kind = device_kind(equipment.name)
     for item in items:
         if (item.section or "") != "Монтажные работы":
             continue
         name = (item.name or "").lower()
+        if work_kind(item) == equipment_kind:
+            return True
         if work_matches_equipment(item, equipment) and any(
             word in name for word in ["монтаж", "установка", "прокладка", "подключение"]
         ):

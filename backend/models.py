@@ -89,6 +89,7 @@ class SmetaItem(Base):
     unit = Column(String)
     quantity = Column(Float, default=1, nullable=False)
     unit_price = Column(Float, nullable=False)
+    base_unit_price = Column(Float, default=0, nullable=False)
     source = Column(String)
 
     smeta = relationship("Smeta", back_populates="items")

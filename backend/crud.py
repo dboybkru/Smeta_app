@@ -433,6 +433,7 @@ def restore_smeta_revision(db, smeta_id, revision_id):
                 unit=item_data.get("unit", ""),
                 quantity=item_data.get("quantity", 1),
                 unit_price=item_data.get("unit_price", 0),
+                base_unit_price=item_data.get("base_unit_price", item_data.get("unit_price", 0)),
                 source=item_data.get("source", ""),
             )
         )
@@ -520,6 +521,7 @@ def clone_smeta(db, smeta_id, name=None):
                 unit=item.unit or "",
                 quantity=item.quantity or 1,
                 unit_price=item.unit_price or 0,
+                base_unit_price=item.base_unit_price if getattr(item, "base_unit_price", None) is not None else (item.unit_price or 0),
                 source=item.source or "",
             )
         )
@@ -546,9 +548,13 @@ def add_smeta_item(db, smeta_id, item_data):
                 existing.characteristics = item_data["characteristics"]
             if item_data.get("source") and not existing.source:
                 existing.source = item_data["source"]
+            if getattr(existing, "base_unit_price", None) is None:
+                existing.base_unit_price = float(item_data.get("base_unit_price") or item_data.get("unit_price") or 0)
             db.commit()
             db.refresh(existing)
             return existing
+    if "base_unit_price" not in item_data or item_data.get("base_unit_price") is None:
+        item_data = {**item_data, "base_unit_price": float(item_data.get("unit_price") or 0)}
     item = SmetaItem(smeta_id=smeta_id, **item_data)
     db.add(item)
     db.commit()
