@@ -223,7 +223,7 @@ def like_variants(term):
     return [f"%{variant}%" for variant in variants if variant]
 
 
-def get_materials(db, q="", item_type="", limit=200):
+def get_materials(db, q="", item_type="", limit=200, offset=0, return_total=False):
     query = db.query(Material)
     if q:
         groups = expanded_query_groups(q)
@@ -259,7 +259,12 @@ def get_materials(db, q="", item_type="", limit=200):
                 (material.name or "").lower(),
             ),
         )
-    return rows[:limit]
+    total = len(rows)
+    offset = max(0, int(offset or 0))
+    page = rows[offset : offset + limit]
+    if return_total:
+        return page, total
+    return page
 
 
 def filter_materials(rows, technology="", megapixels="", price_to=None):

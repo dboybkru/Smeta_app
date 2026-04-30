@@ -57,6 +57,25 @@ def simple_ai_assistant(prompt: str):
     return "Рассмотрите оптимизацию сметы: проверить единицы и объемы."
 
 
+MATERIAL_CATEGORY_TERMS = {
+    "camera": ["камера", "видеокамера", "ip камера", "ahd камера"],
+    "recorder": ["регистратор", "видеорегистратор", "nvr", "dvr"],
+    "cable": ["кабель", "провод"],
+    "network": ["коммутатор", "poe", "конвертер", "интерфейс"],
+    "power": ["ибп", "блок питания", "аккумулятор", "резервирован"],
+    "access": ["скуд", "считыватель", "замок", "контроллер", "с2000"],
+    "storage": ["жесткий диск", "hdd", "жд", "накопитель"],
+}
+
+
+def material_matches_category(material, category):
+    terms = MATERIAL_CATEGORY_TERMS.get((category or "").strip().lower())
+    if not terms:
+        return True
+    text_value = normalize_search_text(f"{material.name or ''} {material.source or ''}")
+    return any(normalize_search_text(term) in text_value for term in terms)
+
+
 def append_ai_audit(event_type, payload):
     record = {
         "ts": datetime.now(timezone.utc).isoformat(),
@@ -2507,15 +2526,27 @@ def read_sections():
 def read_materials(
     q: str = Query(default=""),
     item_type: str = Query(default="all"),
+    category: str = Query(default=""),
     technology: str = Query(default=""),
     megapixels: str = Query(default=""),
     price_to: float | None = Query(default=None, ge=0),
     limit: int = Query(default=200, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
-    rows = get_materials(db, q, item_type, limit=5000 if (technology or megapixels or price_to is not None) else limit)
+    fetch_limit = 5000 if (category or technology or megapixels or price_to is not None) else max(limit + offset, limit)
+    rows = get_materials(db, q, item_type, limit=fetch_limit)
+    rows = [material for material in rows if material_matches_category(material, category)]
     rows = filter_materials(rows, technology, megapixels, price_to)
-    return [material_to_dict(material) for material in rows[:limit]]
+    total = len(rows)
+    page = rows[offset : offset + limit]
+    return {
+        "items": [material_to_dict(material) for material in page],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "has_more": offset + limit < total,
+    }
 
 
 @app.post("/materials")

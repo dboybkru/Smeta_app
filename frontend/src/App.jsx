@@ -2,7 +2,7 @@
 import { Fragment, useState, useEffect } from "react";
 import axios from "axios";
 
-const API_URL = process.env.REACT_APP_API_URL || "http://127.0.0.1:8000";
+const API_URL = process.env.REACT_APP_API_URL || "/api";
 const DEFAULT_SECTIONS = [
   "Оборудование",
   "Монтажные работы",
@@ -12,6 +12,16 @@ const DEFAULT_SECTIONS = [
   "Доставка и логистика",
   "Проектирование",
   "Прочее",
+];
+const EQUIPMENT_CATEGORY_FILTERS = [
+  { id: "", label: "Все категории" },
+  { id: "camera", label: "Камеры" },
+  { id: "recorder", label: "Регистраторы" },
+  { id: "cable", label: "Кабель" },
+  { id: "network", label: "Сеть / PoE" },
+  { id: "power", label: "Питание / ИБП" },
+  { id: "access", label: "СКУД" },
+  { id: "storage", label: "HDD" },
 ];
 
 const emptyMaterial = { name: "", characteristics: "", unit: "", price: "", source: "" };
@@ -37,6 +47,7 @@ const emptySmetaDetails = {
   tax_rate: 0,
   section_adjustments: {},
 };
+const MATERIALS_PAGE_SIZE = 200;
 
 function App() {
   const [authToken, setAuthToken] = useState(() => localStorage.getItem("smeta_token") || "");
@@ -44,8 +55,14 @@ function App() {
   const [loginForm, setLoginForm] = useState({ email: "", password: "" });
   const [authMode, setAuthMode] = useState("login");
   const [activePage, setActivePage] = useState("smetas");
-  const [theme, setTheme] = useState(() => localStorage.getItem("smeta_theme") || "dark");
+  const [theme, setTheme] = useState(() => localStorage.getItem("smeta_theme") || "light");
+  const [shellSearch, setShellSearch] = useState("");
+  const [shellSearchSuggestions, setShellSearchSuggestions] = useState([]);
+  const [shellSearchFocused, setShellSearchFocused] = useState(false);
   const [materials, setMaterials] = useState([]);
+  const [materialsTotal, setMaterialsTotal] = useState(0);
+  const [materialsHasMore, setMaterialsHasMore] = useState(false);
+  const [materialsLoadingMore, setMaterialsLoadingMore] = useState(false);
   const [smetas, setSmetas] = useState([]);
   const [sections, setSections] = useState(DEFAULT_SECTIONS);
   const [selectedSmetaId, setSelectedSmetaId] = useState("");
@@ -54,6 +71,7 @@ function App() {
   const [supplierUrl, setSupplierUrl] = useState("");
   const [materialQuery, setMaterialQuery] = useState("");
   const [materialType, setMaterialType] = useState("equipment");
+  const [equipmentCategoryFilter, setEquipmentCategoryFilter] = useState("");
   const [technologyFilter, setTechnologyFilter] = useState("");
   const [megapixelsFilter, setMegapixelsFilter] = useState("");
   const [priceToFilter, setPriceToFilter] = useState("");
@@ -69,6 +87,7 @@ function App() {
   const [itemForm, setItemForm] = useState(emptyItem);
   const [itemDrafts, setItemDrafts] = useState({});
   const [itemSuggestions, setItemSuggestions] = useState([]);
+  const [expandedSmetaIds, setExpandedSmetaIds] = useState({});
   const [quantityByMaterial, setQuantityByMaterial] = useState({});
   const [expandedItems, setExpandedItems] = useState({});
   const [aiSettings, setAiSettings] = useState({
@@ -161,20 +180,42 @@ function App() {
   }, [activePage, currentUser?.is_admin]);
 
   useEffect(() => {
+    if (materialType === "work" && equipmentCategoryFilter) {
+      setEquipmentCategoryFilter("");
+    }
+  }, [materialType, equipmentCategoryFilter]);
+
+  useEffect(() => {
     if (!authToken || !selectedSmetaId) {
       return;
     }
   }, [authToken, selectedSmetaId]);
 
   useEffect(() => {
+    if (!selectedSmetaId || smetas.length === 0) {
+      return;
+    }
+    const byId = new Map(smetas.map(smeta => [smeta.id, smeta]));
+    const nextExpanded = {};
+    let current = byId.get(Number(selectedSmetaId));
+    while (current?.parent_id) {
+      nextExpanded[Number(current.parent_id)] = true;
+      current = byId.get(Number(current.parent_id));
+    }
+    if (Object.keys(nextExpanded).length > 0) {
+      setExpandedSmetaIds(currentExpanded => ({ ...currentExpanded, ...nextExpanded }));
+    }
+  }, [selectedSmetaId, smetas]);
+
+  useEffect(() => {
     if (!authToken) {
       return undefined;
     }
     const timer = setTimeout(() => {
-      loadMaterials(materialQuery, materialType);
+      loadMaterials();
     }, 220);
     return () => clearTimeout(timer);
-  }, [authToken, materialQuery, materialType, technologyFilter, megapixelsFilter, priceToFilter]);
+  }, [authToken, materialQuery, materialType, equipmentCategoryFilter, technologyFilter, megapixelsFilter, priceToFilter]);
 
   useEffect(() => {
     if (!authToken || activePage !== "smetas") {
@@ -195,13 +236,40 @@ function App() {
             limit: 8,
           },
         });
-        setItemSuggestions(res.data || []);
+        setItemSuggestions(normalizeMaterialsResponse(res.data).items);
       } catch (err) {
         setItemSuggestions([]);
       }
     }, 180);
     return () => clearTimeout(timer);
   }, [authToken, activePage, itemForm.name]);
+
+  useEffect(() => {
+    if (!authToken) {
+      setShellSearchSuggestions([]);
+      return undefined;
+    }
+    const query = shellSearch.trim();
+    if (query.length < 2) {
+      setShellSearchSuggestions([]);
+      return undefined;
+    }
+    const timer = setTimeout(async () => {
+      try {
+        const res = await axios.get(`${API_URL}/materials`, {
+          params: {
+            q: query,
+            item_type: "all",
+            limit: 8,
+          },
+        });
+        setShellSearchSuggestions(normalizeMaterialsResponse(res.data).items);
+      } catch (err) {
+        setShellSearchSuggestions([]);
+      }
+    }, 180);
+    return () => clearTimeout(timer);
+  }, [authToken, shellSearch]);
 
   useEffect(() => {
     if (selectedSmeta) {
@@ -227,7 +295,7 @@ function App() {
   const refreshData = async () => {
     const [smetasRes] = await Promise.all([
       axios.get(`${API_URL}/smetas`),
-      loadMaterials(materialQuery, materialType),
+      loadMaterials(),
     ]);
     setSmetas(smetasRes.data);
     if (!selectedSmetaId && smetasRes.data.length > 0) {
@@ -270,19 +338,51 @@ function App() {
     setAdminAccess([]);
   };
 
-  const loadMaterials = async (q = materialQuery, type = materialType) => {
+  const normalizeMaterialsResponse = (data) => {
+    if (Array.isArray(data)) {
+      return {
+        items: data,
+        total: data.length,
+        has_more: false,
+      };
+    }
+    return {
+      items: data?.items || [],
+      total: data?.total ?? (data?.items || []).length,
+      has_more: Boolean(data?.has_more),
+    };
+  };
+
+  const loadMaterials = async (q = materialQuery, type = materialType, offset = 0, append = false) => {
     const res = await axios.get(`${API_URL}/materials`, {
       params: {
         q,
         item_type: type,
+        category: equipmentCategoryFilter || undefined,
         technology: technologyFilter,
         megapixels: megapixelsFilter,
         price_to: priceToFilter || undefined,
-        limit: 200,
+        limit: MATERIALS_PAGE_SIZE,
+        offset,
       },
     });
-    setMaterials(res.data);
-    return res.data;
+    const payload = normalizeMaterialsResponse(res.data);
+    setMaterials(current => append ? [...current, ...payload.items] : payload.items);
+    setMaterialsTotal(payload.total);
+    setMaterialsHasMore(payload.has_more);
+    return payload.items;
+  };
+
+  const loadMoreMaterials = async () => {
+    if (materialsLoadingMore || !materialsHasMore) {
+      return;
+    }
+    setMaterialsLoadingMore(true);
+    try {
+      await loadMaterials(materialQuery, materialType, materials.length, true);
+    } finally {
+      setMaterialsLoadingMore(false);
+    }
   };
 
   const loadSections = async () => {
@@ -900,18 +1000,80 @@ function App() {
     const nextVisited = new Set(visited);
     nextVisited.add(node.id);
     const children = (childrenByParent[node.id] || []).sort((a, b) => b.id - a.id);
+    const hasChildren = children.length > 0;
+    const isExpanded = Boolean(expandedSmetaIds[node.id]) || node.id === Number(selectedSmetaId);
     return [
-      { smeta: node, depth },
-      ...children.flatMap(child => walkSmetaTree(child, depth + 1, nextVisited)),
+      { smeta: node, depth, hasChildren, childCount: children.length, isExpanded },
+      ...(isExpanded ? children.flatMap(child => walkSmetaTree(child, depth + 1, nextVisited)) : []),
     ];
   };
   const smetaTree = roots.flatMap(root => walkSmetaTree(root));
   const pageItems = [
     { id: "smetas", label: "Сметы", hint: selectedSmeta ? selectedSmeta.name : `${smetas.length} смет` },
-    { id: "prices", label: "Прайсы", hint: `${materials.length} позиций` },
+    { id: "prices", label: "Прайсы", hint: `${materials.length} из ${materialsTotal || materials.length} позиций` },
     { id: "assistant", label: "AI Ассистент", hint: selectedSmeta ? "работает с выбранной сметой" : "без выбранной сметы" },
     ...(currentUser?.is_admin ? [{ id: "admin", label: "Админка", hint: `${adminUsers.length} пользователей` }] : []),
   ];
+  const currentPageMeta = pageItems.find(page => page.id === activePage) || pageItems[0];
+  const userAvatar = (currentUser?.email || "db").split("@")[0].slice(0, 2).toUpperCase();
+  const shellQuery = shellSearch.trim().toLowerCase();
+  const smetaSearchResults = shellQuery.length >= 2
+    ? smetas
+      .filter(smeta => {
+        const itemsText = (smeta.items || []).slice(0, 12).map(item => `${item.name || ""} ${item.characteristics || ""}`).join(" ");
+        const searchable = [
+          smeta.name,
+          smeta.customer_name,
+          smeta.contractor_name,
+          smeta.approver_name,
+          itemsText,
+        ].join(" ").toLowerCase();
+        return searchable.includes(shellQuery);
+      })
+      .slice(0, 5)
+    : [];
+  const shellHasResults = smetaSearchResults.length > 0 || shellSearchSuggestions.length > 0;
+
+  const openShellSearchInPrices = () => {
+    const query = shellSearch.trim();
+    if (!query) {
+      return;
+    }
+    setMaterialQuery(query);
+    setActivePage("prices");
+    setShellSearchFocused(false);
+  };
+
+  const handleShellSuggestionAdd = async (material) => {
+    await handleAddMaterialToSmeta(material);
+    setShellSearch("");
+    setShellSearchSuggestions([]);
+    setShellSearchFocused(false);
+  };
+
+  const handleShellSuggestionOpen = (material) => {
+    const nextQuery = material.name || shellSearch.trim();
+    setShellSearch(nextQuery);
+    setMaterialQuery(nextQuery);
+    setActivePage("prices");
+    setShellSearchFocused(false);
+  };
+
+  const handleShellSmetaOpen = (smeta) => {
+    setSelectedSmetaId(String(smeta.id));
+    setActivePage("smetas");
+    setShellSearch("");
+    setShellSearchSuggestions([]);
+    setShellSearchFocused(false);
+  };
+
+  const handleShellSearchKeyDown = (event) => {
+    if (event.key !== "Enter") {
+      return;
+    }
+    event.preventDefault();
+    openShellSearchInPrices();
+  };
 
   if (!authToken) {
     return (
@@ -958,728 +1120,877 @@ function App() {
   }
 
   return (
-    <main className="app-shell">
-      <header className="topbar">
-        <div>
-          <p className="eyebrow">Сметный рабочий стол</p>
-          <h1>Материалы, сметы и быстрые проверки</h1>
-          {currentUser && <p className="user-line">{currentUser.email}{currentUser.is_admin ? " · админ" : ""}</p>}
-        </div>
-        <div className="total-box">
-          <span>Итого по смете</span>
-          <strong>{money(previewSmeta?.total || 0)}</strong>
-          <div className="topbar-actions">
-            <button
-              className="ghost theme-toggle"
-              onClick={() => setTheme(current => current === "dark" ? "light" : "dark")}
-            >
-              {theme === "dark" ? "Светлая тема" : "Тёмная тема"}
-            </button>
-            <button className="ghost" onClick={handleLogout}>Выйти</button>
-          </div>
-        </div>
-      </header>
-
-      {(message || error) && (
-        <div className={error ? "notice error" : "notice"}>
-          {error || message}
-        </div>
-      )}
-
-      <nav className="page-nav" aria-label="Разделы приложения">
-        {pageItems.map(page => (
-          <button
-            key={page.id}
-            className={activePage === page.id ? "active" : ""}
-            onClick={() => setActivePage(page.id)}
-          >
-            <strong>{page.label}</strong>
-            <span>{page.hint}</span>
-          </button>
-        ))}
-      </nav>
-
-      {activePage === "smetas" && (
-      <section className="workspace">
-        <aside className="panel sidebar">
-          <h2>Сметы</h2>
-          <div className="inline-form">
-            <input
-              type="text"
-              placeholder="Новая смета"
-              value={smetaName}
-              onChange={e => setSmetaName(e.target.value)}
-            />
-            <button onClick={handleCreateSmeta}>Создать</button>
+    <main className="app-shell shell-layout h-layout">
+      <div className="main-shell">
+        <header className="topbar">
+          <div className="topbar-breadcrumb">
+            <span className="topbar-app">СметаПро</span>
+            <span className="topbar-sep">/</span>
+            <span className="topbar-page">{currentPageMeta?.label || "Рабочий стол"}</span>
+            {currentUser?.email && <span className="topbar-user">{currentUser.email}</span>}
           </div>
 
-          <div className="smeta-list">
-            {smetaTree.map(({ smeta, depth }) => (
+          <nav className="topbar-tabs" aria-label="Разделы приложения">
+            {pageItems.map(page => (
               <button
-                key={smeta.id}
-                className={`${smeta.id === Number(selectedSmetaId) ? "smeta-card active" : "smeta-card"} ${depth > 0 ? "branch" : ""}`}
-                style={{ marginLeft: depth ? `${Math.min(depth, 5) * 22}px` : undefined }}
-                onClick={() => setSelectedSmetaId(String(smeta.id))}
+                key={page.id}
+                className={activePage === page.id ? "topbar-tab active" : "topbar-tab"}
+                onClick={() => setActivePage(page.id)}
+                title={page.hint}
               >
-                <span>{depth > 0 ? `↳ ${smeta.name}` : smeta.name}</span>
-                {parentIdOf(smeta) && <em>Ветка от сметы #{parentIdOf(smeta)}</em>}
-                <strong>{money(smeta.total)}</strong>
+                {page.label}
               </button>
             ))}
-            {smetas.length === 0 && <p className="muted">Создайте первую смету.</p>}
-          </div>
-        </aside>
+          </nav>
 
-        <section className="panel estimate-panel">
-          <div className="section-title">
-            <div>
-              <h2>{selectedSmeta?.name || "Смета не выбрана"}</h2>
-              <p>{selectedSmeta ? `${selectedSmeta.items.length} позиций` : "Выберите смету слева"}</p>
-            </div>
-            <div className="title-actions">
-              <strong>{money(previewSmeta?.total || 0)}</strong>
-              {selectedSmeta && (
-                <>
-                  <button className="ghost" onClick={handleBranchSmeta}>Сделать ветку</button>
-                  <button className="ghost" onClick={handleCheckSmeta}>Проверить смету</button>
-                  <button className="ghost" onClick={handleExportExcel}>Excel</button>
-                  <button className="ghost" onClick={handlePrintSmeta}>PDF</button>
-                  <button className="ghost danger" onClick={handleDeleteSmeta}>Удалить смету</button>
-                </>
-              )}
-            </div>
-          </div>
-
-          {selectedSmeta && (
-            <div className="smeta-details">
+          <div className="topbar-search-wrap">
+            <label className="topbar-search">
+              <span className="search-icon" aria-hidden="true">⌕</span>
               <input
                 type="text"
-                placeholder="Название сметы"
-                value={smetaDetails.name}
-                onChange={e => updateSmetaDetails("name", e.target.value)}
+                placeholder="Поиск оборудования, работ, кабеля..."
+                value={shellSearch}
+                onChange={e => setShellSearch(e.target.value)}
+                onFocus={() => setShellSearchFocused(true)}
+                onBlur={() => setTimeout(() => setShellSearchFocused(false), 120)}
+                onKeyDown={handleShellSearchKeyDown}
               />
-              <input
-                type="text"
-                placeholder="Заказчик"
-                value={smetaDetails.customer_name}
-                onChange={e => updateSmetaDetails("customer_name", e.target.value)}
-              />
-              <textarea
-                placeholder="Реквизиты заказчика"
-                value={smetaDetails.customer_details}
-                onChange={e => updateSmetaDetails("customer_details", e.target.value)}
-              />
-              <input
-                type="text"
-                placeholder="Исполнитель"
-                value={smetaDetails.contractor_name}
-                onChange={e => updateSmetaDetails("contractor_name", e.target.value)}
-              />
-              <textarea
-                placeholder="Реквизиты исполнителя"
-                value={smetaDetails.contractor_details}
-                onChange={e => updateSmetaDetails("contractor_details", e.target.value)}
-              />
-              <input
-                type="text"
-                placeholder="Согласующий"
-                value={smetaDetails.approver_name}
-                onChange={e => updateSmetaDetails("approver_name", e.target.value)}
-              />
-              <textarea
-                placeholder="Реквизиты согласующего"
-                value={smetaDetails.approver_details}
-                onChange={e => updateSmetaDetails("approver_details", e.target.value)}
-              />
-              <select
-                value={smetaDetails.tax_mode}
-                onChange={e => updateSmetaDetails("tax_mode", e.target.value)}
-              >
-                <option value="none">Без НДС</option>
-                <option value="vat_added">НДС сверху</option>
-                <option value="vat_included">НДС в том числе</option>
-              </select>
-              <select
-                value={smetaDetails.tax_rate}
-                onChange={e => updateSmetaDetails("tax_rate", e.target.value)}
-              >
-                <option value="0">0%</option>
-                <option value="5">5% УСН</option>
-                <option value="7">7% УСН</option>
-                <option value="10">10%</option>
-                <option value="22">22% НДС</option>
-              </select>
-              <div className="tax-summary">
-                <span>До налога: {money(previewSmeta.subtotal || 0)}</span>
-                <span>Налог: {money(previewSmeta.tax_amount || 0)}</span>
-              </div>
-              <button onClick={handleSaveSmetaDetails}>Сохранить реквизиты</button>
-              <input
-                type="email"
-                placeholder="Email для доступа"
-                value={shareForm.email}
-                onChange={e => setShareForm(current => ({ ...current, email: e.target.value }))}
-              />
-              <select
-                value={shareForm.permission}
-                onChange={e => setShareForm(current => ({ ...current, permission: e.target.value }))}
-              >
-                <option value="view">Только просмотр</option>
-                <option value="edit">Совместное редактирование</option>
-              </select>
-              <button className="ghost" onClick={handleShareSmeta}>Поделиться</button>
-            </div>
-          )}
-
-          {selectedSmeta && currentUser?.is_admin && (
-            <div className="revision-panel">
-              <div className="section-title compact">
-                <div>
-                  <h2>Доступ к смете</h2>
-                  <p>{selectedSmeta.name}</p>
-                </div>
-              </div>
-              {adminAccess.length > 0 ? (
-                <>
-                  <p className="muted">К этой смете есть доступ у {adminAccess.length} пользователей.</p>
-                  <div className="admin-access-list">
-                    {adminAccess.map(access => (
-                      <div key={access.id} className="admin-access-row">
-                        <div>
-                          <strong>{access.email}</strong>
-                          <span>{access.permission === "edit" ? "редактирование" : "просмотр"}</span>
-                        </div>
-                        <button className="ghost danger" disabled={adminBusy} onClick={() => handleRevokeAccess(access.user_id)}>
-                          Отозвать
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                </>
-              ) : (
-                <p className="muted">У этой сметы пока нет расшаренных доступов.</p>
-              )}
-            </div>
-          )}
-
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Позиция</th>
-                  <th>Кол-во</th>
-                  <th>Цена</th>
-                  <th>Сумма</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {groupedItems.map(group => (
-                  <Fragment key={group.section}>
-                    <tr className="section-row">
-                      <td colSpan="5">
-                        <strong>{group.section}</strong>
-                        <label className="section-percent">
-                          <input
-                            type="number"
-                            step="1"
-                            value={(smetaDetails.section_adjustments || {})[group.section] ?? 0}
-                            onChange={e => updateSectionAdjustment(group.section, e.target.value)}
-                          />
-                          %
-                        </label>
-                        <span>{money(group.items.reduce((sum, item) => sum + item.total, 0))}</span>
-                      </td>
-                    </tr>
-                    {group.items.map(item => (
-                      <tr key={item.id}>
-                        <td>
-                          <div className="item-cardline">
-                            <strong>{item.name}</strong>
-                            {hasLongDetails(item) && (
-                              <button className="icon-button" onClick={() => toggleItem(item.id)}>
-                                {expandedItems[item.id] ? "Свернуть" : "Детали"}
-                              </button>
-                            )}
-                          </div>
-                          <div className={expandedItems[item.id] ? "item-details expanded" : "item-details"}>
-                            {!expandedItems[item.id] && compactDetails(item.characteristics).map((line, index) => (
-                              <span key={index}>{line}</span>
-                            ))}
-                            {expandedItems[item.id] && <small>{item.characteristics || "Описание не заполнено"}</small>}
-                            <em>{item.unit || "ед."} · {item.source || "без источника"}</em>
-                            {hasManualPrice(item) && (
-                              <span
-                                className="price-badge"
-                                title={`Цена из базы: ${money(item.base_unit_price)}`}
-                              >
-                                ручная цена
-                              </span>
-                            )}
-                            {item.section_adjustment_percent !== 0 && (
-                              <em>Цена с корректировкой раздела: {money(item.effective_unit_price)}</em>
-                            )}
-                          </div>
-                        </td>
-                        <td>
-                          <input
-                            className="table-number"
-                            type="text"
-                            inputMode="numeric"
-                            pattern="[0-9]*"
-                            value={getItemDraft(item, "quantity", String(Math.round(item.quantity || 1)))}
-                            onChange={e => updateItemDraft(item, "quantity", e.target.value)}
-                            onBlur={() => commitItemDraft(item, "quantity")}
-                          />
-                        </td>
-                        <td>
-                          <input
-                            className="table-number price"
-                            type="text"
-                            inputMode="decimal"
-                            value={getItemDraft(item, "unit_price", String(item.unit_price ?? 0))}
-                            onChange={e => updateItemDraft(item, "unit_price", e.target.value)}
-                            onBlur={() => commitItemDraft(item, "unit_price")}
-                          />
-                        </td>
-                        <td>{money(item.total)}</td>
-                        <td>
-                          <button className="ghost danger" onClick={() => handleDeleteItem(item.id)}>
-                            Удалить
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </Fragment>
-                ))}
-                {(!selectedSmeta || selectedSmeta.items.length === 0) && (
-                  <tr>
-                    <td colSpan="5" className="empty">Добавьте материалы или ручную позицию.</td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-
-          <div className="custom-item">
-            <select
-              value={itemForm.section}
-              onChange={e => updateItemForm("section", e.target.value)}
-            >
-              {sections.map(section => <option key={section} value={section}>{section}</option>)}
-            </select>
-            <input
-              type="text"
-              placeholder="Ручная позиция"
-              value={itemForm.name}
-              onChange={e => updateItemForm("name", e.target.value)}
-            />
-            <input
-              type="text"
-              placeholder="Характеристики"
-              value={itemForm.characteristics}
-              onChange={e => updateItemForm("characteristics", e.target.value)}
-            />
-            <input
-              type="text"
-              placeholder="Ед."
-              value={itemForm.unit}
-              onChange={e => updateItemForm("unit", e.target.value)}
-            />
-            <input
-              type="number"
-              min="1"
-              step="1"
-              inputMode="numeric"
-              pattern="[0-9]*"
-              placeholder="Кол-во"
-              value={itemForm.quantity}
-              onChange={e => updateItemForm("quantity", wholeQuantityInput(e.target.value))}
-            />
-            <input
-              type="number"
-              min="0"
-              step="0.01"
-              placeholder="Цена"
-              value={itemForm.unit_price}
-              onChange={e => updateItemForm("unit_price", e.target.value)}
-            />
-            <button onClick={handleAddCustomItem}>Добавить</button>
-          </div>
-          {itemSuggestions.length > 0 && itemForm.name.trim().length >= 2 && (
-            <div className="inline-suggestions">
-              <div className="suggestions-header">
-                <strong>Найдено в базе</strong>
-                <span>Можно добавить сразу, без перехода в прайсы</span>
-              </div>
-              {itemSuggestions.map(material => (
-                <div key={material.id} className="suggestion-row">
-                  <div>
-                    <div className="suggestion-title">
-                      <strong>{material.name}</strong>
-                      <em>{isWorkMaterial(material) ? "работа" : "оборудование"}</em>
+              <kbd>Enter</kbd>
+            </label>
+            {shellSearchFocused && shellSearch.trim().length >= 2 && shellHasResults && (
+              <div className="inline-suggestions shell-search-dropdown" onMouseDown={e => e.preventDefault()}>
+                {smetaSearchResults.length > 0 && (
+                  <div className="shell-result-group">
+                    <div className="suggestions-header">
+                      <strong>Сметы</strong>
+                      <span>По названию, реквизитам и позициям</span>
                     </div>
-                    <span>
-                      {material.characteristics ? `${material.characteristics} · ` : ""}
-                      {material.unit || "ед."} · {material.source || "без источника"}
-                    </span>
+                    {smetaSearchResults.map(smeta => (
+                      <button key={smeta.id} className="shell-smeta-row" onClick={() => handleShellSmetaOpen(smeta)}>
+                        <span>{smeta.name}</span>
+                        <em>{parentIdOf(smeta) ? `ветка от #${parentIdOf(smeta)}` : `${smeta.items?.length || 0} позиций`}</em>
+                        <strong>{money(smeta.total)}</strong>
+                      </button>
+                    ))}
                   </div>
-                  <strong>{money(material.price)}</strong>
-                  <button className="ghost" onClick={() => handleAddSuggestedItem(material)}>
-                    {isWorkMaterial(material) ? "Вставить" : "Вставить + работы"}
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-        </section>
-      </section>
-      )}
-
-      {activePage === "prices" && (
-      <section className="page-content prices-page">
-        <section className="panel">
-          <div className="section-title">
-            <div>
-              <h2>Материалы</h2>
-              <p>{materials.length} релевантных позиций</p>
-            </div>
-          </div>
-
-          <div className="import-box">
-            <div className="segmented">
-              <button
-                className={importMode === "standard" ? "active" : ""}
-                onClick={() => setImportMode("standard")}
-              >
-                Excel как таблица
-              </button>
-              <button
-                className={importMode === "ai" ? "active" : ""}
-                onClick={() => setImportMode("ai")}
-              >
-                AI: Excel/PDF/сайт
-              </button>
-            </div>
-            <input
-              type="file"
-              accept={importMode === "ai" ? ".xlsx,.xls,.pdf" : ".xlsx,.xls"}
-              onChange={e => setFile(e.target.files[0] || null)}
-            />
-            {importMode === "ai" && (
-              <input
-                type="url"
-                placeholder="Или URL сайта поставщика"
-                value={supplierUrl}
-                onChange={e => setSupplierUrl(e.target.value)}
-              />
-            )}
-            <button onClick={handleUpload}>
-              {importMode === "ai" ? "Распарсить и добавить" : "Импорт Excel"}
-            </button>
-          </div>
-
-          <div className="catalog-tools">
-            <div className="segmented">
-              <button
-                className={materialType === "equipment" ? "active" : ""}
-                onClick={() => setMaterialType("equipment")}
-              >
-                Оборудование
-              </button>
-              <button
-                className={materialType === "work" ? "active" : ""}
-                onClick={() => setMaterialType("work")}
-              >
-                Работы
-              </button>
-              <button
-                className={materialType === "all" ? "active" : ""}
-                onClick={() => setMaterialType("all")}
-              >
-                Всё
-              </button>
-            </div>
-            <input
-              type="search"
-              placeholder="Поиск: камера, кабель, монтаж, Optimus..."
-              value={materialQuery}
-              onChange={e => setMaterialQuery(e.target.value)}
-            />
-          </div>
-
-          <div className="smart-filters">
-            <select value={technologyFilter} onChange={e => setTechnologyFilter(e.target.value)}>
-              <option value="">Любая технология</option>
-              <option value="ip">IP</option>
-              <option value="ahd">AHD</option>
-              <option value="poe">PoE</option>
-            </select>
-            <select value={megapixelsFilter} onChange={e => setMegapixelsFilter(e.target.value)}>
-              <option value="">Любое разрешение</option>
-              <option value="2">2 Мп</option>
-              <option value="4">4 Мп</option>
-              <option value="5">5 Мп</option>
-              <option value="8">8 Мп</option>
-            </select>
-            <input
-              type="number"
-              min="0"
-              step="100"
-              placeholder="Цена до"
-              value={priceToFilter}
-              onChange={e => setPriceToFilter(e.target.value)}
-            />
-            <button
-              className="ghost"
-              onClick={() => {
-                setTechnologyFilter("");
-                setMegapixelsFilter("");
-                setPriceToFilter("");
-              }}
-            >
-              Сбросить
-            </button>
-          </div>
-
-          <div className="material-form">
-            <input
-              type="text"
-              placeholder="Название"
-              value={materialForm.name}
-              onChange={e => updateMaterialForm("name", e.target.value)}
-            />
-            <input
-              type="text"
-              placeholder="Характеристики"
-              value={materialForm.characteristics}
-              onChange={e => updateMaterialForm("characteristics", e.target.value)}
-            />
-            <input
-              type="text"
-              placeholder="Ед."
-              value={materialForm.unit}
-              onChange={e => updateMaterialForm("unit", e.target.value)}
-            />
-            <input
-              type="number"
-              min="0"
-              step="0.01"
-              placeholder="Цена"
-              value={materialForm.price}
-              onChange={e => updateMaterialForm("price", e.target.value)}
-            />
-            <input
-              type="text"
-              placeholder="Источник"
-              value={materialForm.source}
-              onChange={e => updateMaterialForm("source", e.target.value)}
-            />
-            <button onClick={handleCreateMaterial}>Сохранить</button>
-          </div>
-
-          <div className="materials-list">
-            {materials.map(material => (
-              <div key={material.id} className="material-row">
-                <div>
-                  <strong>{material.name}</strong>
-                  <span>
-                    {material.characteristics ? `${material.characteristics} · ` : ""}
-                    {material.unit || "ед."} · {material.source || "без источника"}
-                  </span>
-                </div>
-                <strong>{money(material.price)}</strong>
-                <input
-                  type="number"
-                  min="1"
-                  step="1"
-                  inputMode="numeric"
-                  pattern="[0-9]*"
-                  value={quantityByMaterial[material.id] || 1}
-                  onChange={e => setQuantityByMaterial(current => ({
-                    ...current,
-                    [material.id]: wholeQuantityInput(e.target.value),
-                  }))}
-                />
-                <button className="ghost" onClick={() => handleAddMaterialToSmeta(material)}>
-                  {isWorkMaterial(material) ? "В смету" : "В смету + работы"}
-                </button>
-              </div>
-            ))}
-          </div>
-        </section>
-      </section>
-      )}
-
-      {activePage === "assistant" && (
-      <section className="page-content assistant-page">
-        <section className="panel assistant">
-          <h2>AI Ассистент</h2>
-          {selectedSmeta && (
-            <p className="muted">Текущая смета: {selectedSmeta.name} · {money(previewSmeta?.total || 0)}</p>
-          )}
-          <p className="muted">Настройки AI доступны только администратору.</p>
-          <textarea
-            placeholder="Например: создай смету 'СКУД офис', добавь монтажные работы 12 часов по 1800 или удали позицию #5"
-            value={aiPrompt}
-            onChange={e => setAiPrompt(e.target.value)}
-          />
-          <button onClick={handleAiRequest}>Выполнить</button>
-          {aiResponse && <div className="assistant-answer">{aiResponse}</div>}
-        </section>
-      </section>
-      )}
-
-      {activePage === "admin" && currentUser?.is_admin && (
-        <section className="panel admin-settings-panel">
-          <div className="section-title">
-            <div>
-              <h2>Админ-настройки</h2>
-              <p>AI, доступы и управление пользователями</p>
-            </div>
-            <div className="title-actions">
-              <button className="ghost" onClick={handleLoadModels}>
-                Список моделей
-              </button>
-              <button onClick={handleSaveAiSettings}>Сохранить настройки</button>
-            </div>
-          </div>
-
-          <div className="admin-settings-grid">
-            <div className="admin-settings-column">
-              <input
-                type="text"
-                placeholder="API URL"
-                value={aiSettings.base_url}
-                onChange={e => setAiSettings(current => ({ ...current, base_url: e.target.value }))}
-              />
-              <input
-                type="password"
-                placeholder={aiSettings.has_api_key ? `Ключ сохранён: ${aiSettings.masked_api_key}` : "API-ключ"}
-                value={apiKeyInput}
-                onChange={e => setApiKeyInput(e.target.value)}
-              />
-              <input
-                type="text"
-                placeholder="Модель"
-                value={aiSettings.model}
-                onChange={e => setAiSettings(current => ({ ...current, model: e.target.value }))}
-              />
-              {models.length > 0 && (
-                <div className="models-compact">
-                  <div className="model-price-table">
-                    {models.slice(0, 80).map(model => (
-                      <div
-                        key={model.id}
-                        className={model.id === aiSettings.model ? "price-row active" : "price-row"}
-                        onClick={() => handleSelectModel(model.id)}
-                      >
-                        <span>{model.name || model.id}</span>
-                        <small>{modelPrice(model)}</small>
+                )}
+                {shellSearchSuggestions.length > 0 && (
+                  <div className="shell-result-group">
+                    <div className="suggestions-header">
+                      <strong>Позиции базы</strong>
+                      <span>Enter откроет весь список в прайсах</span>
+                    </div>
+                    {shellSearchSuggestions.map(material => (
+                      <div key={material.id} className="suggestion-row">
+                        <div>
+                          <div className="suggestion-title">
+                            <strong>{material.name}</strong>
+                            <em>{isWorkMaterial(material) ? "работа" : "оборудование"}</em>
+                          </div>
+                          <span>
+                            {material.characteristics ? `${material.characteristics} · ` : ""}
+                            {material.unit || "ед."} · {material.source || "без источника"}
+                          </span>
+                        </div>
+                        <strong>{money(material.price)}</strong>
+                        <div className="suggestion-actions">
+                          <button className="ghost" onClick={() => handleShellSuggestionOpen(material)}>В прайсы</button>
+                          <button className="ghost" onClick={() => handleShellSuggestionAdd(material)}>
+                            {isWorkMaterial(material) ? "В смету" : "В смету + работы"}
+                          </button>
+                        </div>
                       </div>
                     ))}
                   </div>
-                </div>
-              )}
-            </div>
-
-            <div className="admin-settings-column">
-              <textarea
-                placeholder="Встроенный промпт ассистента"
-                value={aiSettings.assistant_prompt || ""}
-                onChange={e => setAiSettings(current => ({ ...current, assistant_prompt: e.target.value }))}
-              />
-            </div>
+                )}
+              </div>
+            )}
           </div>
 
-          <div className="admin-two-col">
-            <div className="admin-list">
-              <div className="section-title compact">
-                <div>
-                  <h2>Пользователи</h2>
-                  <p>{adminUsers.length} учетных записей</p>
+          <div className="topbar-right">
+            <div className="topbar-total">
+              <span>Итого</span>
+              <strong>{money(previewSmeta?.total || 0)}</strong>
+            </div>
+            <button
+              className="icon-btn"
+              onClick={() => setTheme(current => current === "dark" ? "light" : "dark")}
+              title={theme === "dark" ? "Светлая тема" : "Тёмная тема"}
+            >
+              {theme === "dark" ? "☀" : "☾"}
+            </button>
+            <button className="icon-btn" onClick={handleLogout} title="Выйти">
+              ⎋
+            </button>
+            <div className="avatar">{userAvatar}</div>
+          </div>
+        </header>
+
+        <main className="content">
+          {(message || error) && (
+            <div className={error ? "notice error" : "notice"}>
+              {error || message}
+            </div>
+          )}
+
+          {activePage === "smetas" && (
+            <section className="workspace">
+              <aside className="panel smeta-sidebar">
+                <h2>Сметы</h2>
+                <div className="inline-form">
+                  <input
+                    type="text"
+                    placeholder="Новая смета"
+                    value={smetaName}
+                    onChange={e => setSmetaName(e.target.value)}
+                  />
+                  <button onClick={handleCreateSmeta}>Создать</button>
                 </div>
-                {selectedAdminUser && <p className="muted">Выбран: {selectedAdminUser.email}</p>}
-              </div>
-              {adminUsers.map(user => (
-                <div
-                  key={user.id}
-                  className={String(user.id) === String(adminSelectedUserId) ? "admin-user-row active" : "admin-user-row"}
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => handleSelectAdminUser(user.id)}
-                  onKeyDown={e => {
-                    if (e.key === "Enter" || e.key === " ") {
-                      handleSelectAdminUser(user.id);
-                    }
-                  }}
-                >
+
+                <div className="smeta-list">
+                  {smetaTree.map(({ smeta, depth, hasChildren, childCount, isExpanded }) => (
+                    <div
+                      key={smeta.id}
+                      className={`${smeta.id === Number(selectedSmetaId) ? "smeta-card active" : "smeta-card"} ${depth > 0 ? "branch" : ""} ${hasChildren ? "has-branches" : ""}`}
+                      style={{ marginLeft: depth ? `${Math.min(depth, 5) * 22}px` : undefined }}
+                    >
+                      <button
+                        className="smeta-card-main"
+                        onClick={() => {
+                          setSelectedSmetaId(String(smeta.id));
+                          if (hasChildren) {
+                            setExpandedSmetaIds(current => ({ ...current, [smeta.id]: true }));
+                          }
+                        }}
+                      >
+                        <span>{depth > 0 ? `↳ ${smeta.name}` : smeta.name}</span>
+                        {parentIdOf(smeta) && <em>Ветка от сметы #{parentIdOf(smeta)}</em>}
+                        {hasChildren && <em>{childCount} ветк{childCount === 1 ? "а" : childCount < 5 ? "и" : "ок"} {isExpanded ? "открыто" : "свернуто"}</em>}
+                        <strong>{money(smeta.total)}</strong>
+                      </button>
+                      {hasChildren && (
+                        <button
+                          className="branch-toggle"
+                          title={isExpanded ? "Свернуть ветки" : "Показать ветки"}
+                          onClick={() => setExpandedSmetaIds(current => ({ ...current, [smeta.id]: !isExpanded }))}
+                        >
+                          {isExpanded ? "-" : "+"}
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                  {smetas.length === 0 && <p className="muted">Создайте первую смету.</p>}
+                </div>
+              </aside>
+
+              <section className="panel estimate-panel">
+                <div className="section-title">
                   <div>
-                    <strong>{user.email}</strong>
-                    <span>
-                      #{user.id}
-                      {user.created_at ? ` · ${new Date(user.created_at).toLocaleDateString("ru-RU")}` : ""}
-                    </span>
+                    <h2>{selectedSmeta?.name || "Смета не выбрана"}</h2>
+                    <p>{selectedSmeta ? `${selectedSmeta.items.length} позиций` : "Выберите смету слева"}</p>
                   </div>
-                  <div className="admin-user-actions">
-                    <span className={user.is_admin ? "badge admin" : "badge"}>{user.is_admin ? "админ" : "пользователь"}</span>
-                    {user.email !== "dboy@bk.ru" && (
+                  <div className="title-actions">
+                    <strong>{money(previewSmeta?.total || 0)}</strong>
+                    {selectedSmeta && (
                       <>
-                        <button className="ghost" disabled={adminBusy} onClick={e => { e.stopPropagation(); handleToggleAdmin(user); }}>
-                          {user.is_admin ? "Снять админа" : "Сделать админом"}
-                        </button>
-                        <button className="ghost danger" disabled={adminBusy} onClick={e => { e.stopPropagation(); handleDeleteUser(user); }}>
-                          Удалить
-                        </button>
+                        <button className="ghost" onClick={handleBranchSmeta}>Сделать ветку</button>
+                        <button className="ghost" onClick={handleCheckSmeta}>Проверить смету</button>
+                        <button className="ghost" onClick={handleExportExcel}>Excel</button>
+                        <button className="ghost" onClick={handlePrintSmeta}>PDF</button>
+                        <button className="ghost danger" onClick={handleDeleteSmeta}>Удалить смету</button>
                       </>
                     )}
                   </div>
                 </div>
-              ))}
-            </div>
 
-            <div className="admin-access">
-              <div className="section-title compact">
+                {selectedSmeta && (
+                  <div className="estimate-commandbar">
+                    <nav className="estimate-section-tabs" aria-label="Разделы сметы">
+                      {groupedItems.map(group => (
+                        <button
+                          key={group.section}
+                          className={itemForm.section === group.section ? "estimate-section-tab active" : "estimate-section-tab"}
+                          onClick={() => updateItemForm("section", group.section)}
+                          title={`Добавлять новые позиции в раздел «${group.section}»`}
+                        >
+                          <span>{group.section}</span>
+                          <strong>{money(group.items.reduce((sum, item) => sum + item.total, 0))}</strong>
+                        </button>
+                      ))}
+                    </nav>
+                    <div className="estimate-ai-bar">
+                      <span>AI</span>
+                      <input
+                        type="text"
+                        placeholder="Например: добавь 2 камеры или проверь монтаж"
+                        value={aiPrompt}
+                        onChange={e => setAiPrompt(e.target.value)}
+                        onKeyDown={e => {
+                          if (e.key === "Enter") {
+                            handleAiRequest();
+                          }
+                        }}
+                      />
+                      <button className="ghost" onClick={handleAiRequest}>Выполнить</button>
+                    </div>
+                  </div>
+                )}
+
+                {selectedSmeta && (
+                  <div className="smeta-details">
+                    <input
+                      type="text"
+                      placeholder="Название сметы"
+                      value={smetaDetails.name}
+                      onChange={e => updateSmetaDetails("name", e.target.value)}
+                    />
+                    <input
+                      type="text"
+                      placeholder="Заказчик"
+                      value={smetaDetails.customer_name}
+                      onChange={e => updateSmetaDetails("customer_name", e.target.value)}
+                    />
+                    <textarea
+                      placeholder="Реквизиты заказчика"
+                      value={smetaDetails.customer_details}
+                      onChange={e => updateSmetaDetails("customer_details", e.target.value)}
+                    />
+                    <input
+                      type="text"
+                      placeholder="Исполнитель"
+                      value={smetaDetails.contractor_name}
+                      onChange={e => updateSmetaDetails("contractor_name", e.target.value)}
+                    />
+                    <textarea
+                      placeholder="Реквизиты исполнителя"
+                      value={smetaDetails.contractor_details}
+                      onChange={e => updateSmetaDetails("contractor_details", e.target.value)}
+                    />
+                    <input
+                      type="text"
+                      placeholder="Согласующий"
+                      value={smetaDetails.approver_name}
+                      onChange={e => updateSmetaDetails("approver_name", e.target.value)}
+                    />
+                    <textarea
+                      placeholder="Реквизиты согласующего"
+                      value={smetaDetails.approver_details}
+                      onChange={e => updateSmetaDetails("approver_details", e.target.value)}
+                    />
+                    <select
+                      value={smetaDetails.tax_mode}
+                      onChange={e => updateSmetaDetails("tax_mode", e.target.value)}
+                    >
+                      <option value="none">Без НДС</option>
+                      <option value="vat_added">НДС сверху</option>
+                      <option value="vat_included">НДС в том числе</option>
+                    </select>
+                    <select
+                      value={smetaDetails.tax_rate}
+                      onChange={e => updateSmetaDetails("tax_rate", e.target.value)}
+                    >
+                      <option value="0">0%</option>
+                      <option value="5">5% УСН</option>
+                      <option value="7">7% УСН</option>
+                      <option value="10">10%</option>
+                      <option value="22">22% НДС</option>
+                    </select>
+                    <div className="tax-summary">
+                      <span>До налога: {money(previewSmeta.subtotal || 0)}</span>
+                      <span>Налог: {money(previewSmeta.tax_amount || 0)}</span>
+                    </div>
+                    <button onClick={handleSaveSmetaDetails}>Сохранить реквизиты</button>
+                    <input
+                      type="email"
+                      placeholder="Email для доступа"
+                      value={shareForm.email}
+                      onChange={e => setShareForm(current => ({ ...current, email: e.target.value }))}
+                    />
+                    <select
+                      value={shareForm.permission}
+                      onChange={e => setShareForm(current => ({ ...current, permission: e.target.value }))}
+                    >
+                      <option value="view">Только просмотр</option>
+                      <option value="edit">Совместное редактирование</option>
+                    </select>
+                    <button className="ghost" onClick={handleShareSmeta}>Поделиться</button>
+                  </div>
+                )}
+
+                {selectedSmeta && currentUser?.is_admin && (
+                  <div className="revision-panel">
+                    <div className="section-title compact">
+                      <div>
+                        <h2>Доступ к смете</h2>
+                        <p>{selectedSmeta.name}</p>
+                      </div>
+                    </div>
+                    {adminAccess.length > 0 ? (
+                      <>
+                        <p className="muted">К этой смете есть доступ у {adminAccess.length} пользователей.</p>
+                        <div className="admin-access-list">
+                          {adminAccess.map(access => (
+                            <div key={access.id} className="admin-access-row">
+                              <div>
+                                <strong>{access.email}</strong>
+                                <span>{access.permission === "edit" ? "редактирование" : "просмотр"}</span>
+                              </div>
+                              <button className="ghost danger" disabled={adminBusy} onClick={() => handleRevokeAccess(access.user_id)}>
+                                Отозвать
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      </>
+                    ) : (
+                      <p className="muted">У этой сметы пока нет расшаренных доступов.</p>
+                    )}
+                  </div>
+                )}
+
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Позиция</th>
+                        <th>Кол-во</th>
+                        <th>Цена</th>
+                        <th>Сумма</th>
+                        <th></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {groupedItems.map(group => (
+                        <Fragment key={group.section}>
+                          <tr className="section-row">
+                            <td colSpan="5">
+                              <strong>{group.section}</strong>
+                              <label className="section-percent">
+                                <input
+                                  type="number"
+                                  step="1"
+                                  value={(smetaDetails.section_adjustments || {})[group.section] ?? 0}
+                                  onChange={e => updateSectionAdjustment(group.section, e.target.value)}
+                                />
+                                %
+                              </label>
+                              <span>{money(group.items.reduce((sum, item) => sum + item.total, 0))}</span>
+                            </td>
+                          </tr>
+                          {group.items.map(item => (
+                            <tr key={item.id}>
+                              <td>
+                                <div className="item-cardline">
+                                  <strong>{item.name}</strong>
+                                  {hasLongDetails(item) && (
+                                    <button className="icon-button" onClick={() => toggleItem(item.id)}>
+                                      {expandedItems[item.id] ? "Свернуть" : "Детали"}
+                                    </button>
+                                  )}
+                                </div>
+                                <div className={expandedItems[item.id] ? "item-details expanded" : "item-details"}>
+                                  {!expandedItems[item.id] && compactDetails(item.characteristics).map((line, index) => (
+                                    <span key={index}>{line}</span>
+                                  ))}
+                                  {expandedItems[item.id] && <small>{item.characteristics || "Описание не заполнено"}</small>}
+                                  <em>{item.unit || "ед."} · {item.source || "без источника"}</em>
+                                  {hasManualPrice(item) && (
+                                    <span
+                                      className="price-badge"
+                                      title={`Цена из базы: ${money(item.base_unit_price)}`}
+                                    >
+                                      ручная цена
+                                    </span>
+                                  )}
+                                  {item.section_adjustment_percent !== 0 && (
+                                    <em>Цена с корректировкой раздела: {money(item.effective_unit_price)}</em>
+                                  )}
+                                </div>
+                              </td>
+                              <td>
+                                <input
+                                  className="table-number"
+                                  type="text"
+                                  inputMode="numeric"
+                                  pattern="[0-9]*"
+                                  value={getItemDraft(item, "quantity", String(Math.round(item.quantity || 1)))}
+                                  onChange={e => updateItemDraft(item, "quantity", e.target.value)}
+                                  onBlur={() => commitItemDraft(item, "quantity")}
+                                />
+                              </td>
+                              <td>
+                                <input
+                                  className="table-number price"
+                                  type="text"
+                                  inputMode="decimal"
+                                  value={getItemDraft(item, "unit_price", String(item.unit_price ?? 0))}
+                                  onChange={e => updateItemDraft(item, "unit_price", e.target.value)}
+                                  onBlur={() => commitItemDraft(item, "unit_price")}
+                                />
+                              </td>
+                              <td>{money(item.total)}</td>
+                              <td>
+                                <button className="ghost danger" onClick={() => handleDeleteItem(item.id)}>
+                                  Удалить
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </Fragment>
+                      ))}
+                      {(!selectedSmeta || selectedSmeta.items.length === 0) && (
+                        <tr>
+                          <td colSpan="5" className="empty">Добавьте материалы или ручную позицию.</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div className="custom-item">
+                  <select
+                    value={itemForm.section}
+                    onChange={e => updateItemForm("section", e.target.value)}
+                  >
+                    {sections.map(section => <option key={section} value={section}>{section}</option>)}
+                  </select>
+                  <div className="custom-name-field">
+                    <input
+                      type="text"
+                      placeholder="Ручная позиция"
+                      value={itemForm.name}
+                      onChange={e => updateItemForm("name", e.target.value)}
+                    />
+                  </div>
+                  <input
+                    type="text"
+                    placeholder="Характеристики"
+                    value={itemForm.characteristics}
+                    onChange={e => updateItemForm("characteristics", e.target.value)}
+                  />
+                  <input
+                    type="text"
+                    placeholder="Ед."
+                    value={itemForm.unit}
+                    onChange={e => updateItemForm("unit", e.target.value)}
+                  />
+                  <input
+                    type="number"
+                    min="1"
+                    step="1"
+                    inputMode="numeric"
+                    pattern="[0-9]*"
+                    placeholder="Кол-во"
+                    value={itemForm.quantity}
+                    onChange={e => updateItemForm("quantity", wholeQuantityInput(e.target.value))}
+                  />
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    placeholder="Цена"
+                    value={itemForm.unit_price}
+                    onChange={e => updateItemForm("unit_price", e.target.value)}
+                  />
+                  <button onClick={handleAddCustomItem}>Добавить</button>
+                  {itemSuggestions.length > 0 && itemForm.name.trim().length >= 2 && (
+                    <div className="inline-suggestions form-suggestions">
+                      <div className="suggestions-header">
+                        <strong>Найдено в базе</strong>
+                        <span>Можно вставить готовую позицию без перехода в прайсы</span>
+                      </div>
+                      {itemSuggestions.map(material => (
+                        <div key={material.id} className="suggestion-row">
+                          <div>
+                            <div className="suggestion-title">
+                              <strong>{material.name}</strong>
+                              <em>{isWorkMaterial(material) ? "работа" : "оборудование"}</em>
+                            </div>
+                            <span>
+                              {material.characteristics ? `${material.characteristics} · ` : ""}
+                              {material.unit || "ед."} · {material.source || "без источника"}
+                            </span>
+                          </div>
+                          <strong>{money(material.price)}</strong>
+                          <button className="ghost" onClick={() => handleAddSuggestedItem(material)}>
+                            {isWorkMaterial(material) ? "Вставить" : "Вставить + работы"}
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+              </section>
+            </section>
+          )}
+
+          {activePage === "prices" && (
+            <section className="page-content prices-page">
+              <section className="panel">
+                <div className="section-title">
+                  <div>
+                    <h2>Материалы</h2>
+                    <p>Показано {materials.length} из {materialsTotal || materials.length} релевантных позиций</p>
+                  </div>
+                </div>
+
+                <div className="import-box">
+                  <div className="segmented">
+                    <button
+                      className={importMode === "standard" ? "active" : ""}
+                      onClick={() => setImportMode("standard")}
+                    >
+                      Excel как таблица
+                    </button>
+                    <button
+                      className={importMode === "ai" ? "active" : ""}
+                      onClick={() => setImportMode("ai")}
+                    >
+                      AI: Excel/PDF/сайт
+                    </button>
+                  </div>
+                  <input
+                    type="file"
+                    accept={importMode === "ai" ? ".xlsx,.xls,.pdf" : ".xlsx,.xls"}
+                    onChange={e => setFile(e.target.files[0] || null)}
+                  />
+                  {importMode === "ai" && (
+                    <input
+                      type="url"
+                      placeholder="Или URL сайта поставщика"
+                      value={supplierUrl}
+                      onChange={e => setSupplierUrl(e.target.value)}
+                    />
+                  )}
+                  <button onClick={handleUpload}>
+                    {importMode === "ai" ? "Распарсить и добавить" : "Импорт Excel"}
+                  </button>
+                </div>
+
+                <div className="catalog-tools">
+                  <div className="segmented">
+                    <button
+                      className={materialType === "equipment" ? "active" : ""}
+                      onClick={() => setMaterialType("equipment")}
+                    >
+                      Оборудование
+                    </button>
+                    <button
+                      className={materialType === "work" ? "active" : ""}
+                      onClick={() => setMaterialType("work")}
+                    >
+                      Работы
+                    </button>
+                    <button
+                      className={materialType === "all" ? "active" : ""}
+                      onClick={() => setMaterialType("all")}
+                    >
+                      Всё
+                    </button>
+                  </div>
+                  <input
+                    type="search"
+                    placeholder="Поиск: камера, кабель, монтаж, Optimus..."
+                    value={materialQuery}
+                    onChange={e => setMaterialQuery(e.target.value)}
+                  />
+                </div>
+
+                <div className="smart-filters">
+                  <select value={technologyFilter} onChange={e => setTechnologyFilter(e.target.value)}>
+                    <option value="">Любая технология</option>
+                    <option value="ip">IP</option>
+                    <option value="ahd">AHD</option>
+                    <option value="poe">PoE</option>
+                  </select>
+                  <select value={megapixelsFilter} onChange={e => setMegapixelsFilter(e.target.value)}>
+                    <option value="">Любое разрешение</option>
+                    <option value="2">2 Мп</option>
+                    <option value="4">4 Мп</option>
+                    <option value="5">5 Мп</option>
+                    <option value="8">8 Мп</option>
+                  </select>
+                  <input
+                    type="number"
+                    min="0"
+                    step="100"
+                    placeholder="Цена до"
+                    value={priceToFilter}
+                    onChange={e => setPriceToFilter(e.target.value)}
+                  />
+                  <button
+                    className="ghost"
+                    onClick={() => {
+                      setTechnologyFilter("");
+                      setMegapixelsFilter("");
+                      setPriceToFilter("");
+                      setEquipmentCategoryFilter("");
+                    }}
+                  >
+                    Сбросить
+                  </button>
+                </div>
+
+                {materialType !== "work" && (
+                  <div className="equipment-filters" aria-label="Фильтры оборудования">
+                    {EQUIPMENT_CATEGORY_FILTERS.map(category => (
+                      <button
+                        key={category.id || "all"}
+                        className={equipmentCategoryFilter === category.id ? "active" : ""}
+                        onClick={() => setEquipmentCategoryFilter(category.id)}
+                      >
+                        {category.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                <div className="material-form">
+                  <input
+                    type="text"
+                    placeholder="Название"
+                    value={materialForm.name}
+                    onChange={e => updateMaterialForm("name", e.target.value)}
+                  />
+                  <input
+                    type="text"
+                    placeholder="Характеристики"
+                    value={materialForm.characteristics}
+                    onChange={e => updateMaterialForm("characteristics", e.target.value)}
+                  />
+                  <input
+                    type="text"
+                    placeholder="Ед."
+                    value={materialForm.unit}
+                    onChange={e => updateMaterialForm("unit", e.target.value)}
+                  />
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    placeholder="Цена"
+                    value={materialForm.price}
+                    onChange={e => updateMaterialForm("price", e.target.value)}
+                  />
+                  <input
+                    type="text"
+                    placeholder="Источник"
+                    value={materialForm.source}
+                    onChange={e => updateMaterialForm("source", e.target.value)}
+                  />
+                  <button onClick={handleCreateMaterial}>Сохранить</button>
+                </div>
+
+                <div className="materials-list">
+                  {materials.map(material => (
+                    <div key={material.id} className="material-row">
+                      <div>
+                        <strong>{material.name}</strong>
+                        <span>
+                          {material.characteristics ? `${material.characteristics} · ` : ""}
+                          {material.unit || "ед."} · {material.source || "без источника"}
+                        </span>
+                      </div>
+                      <strong>{money(material.price)}</strong>
+                      <input
+                        type="number"
+                        min="1"
+                        step="1"
+                        inputMode="numeric"
+                        pattern="[0-9]*"
+                        value={quantityByMaterial[material.id] || 1}
+                        onChange={e => setQuantityByMaterial(current => ({
+                          ...current,
+                          [material.id]: wholeQuantityInput(e.target.value),
+                        }))}
+                      />
+                      <button className="ghost" onClick={() => handleAddMaterialToSmeta(material)}>
+                        {isWorkMaterial(material) ? "В смету" : "В смету + работы"}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                {materialsHasMore && (
+                  <button className="ghost load-more" disabled={materialsLoadingMore} onClick={loadMoreMaterials}>
+                    {materialsLoadingMore ? "Загружаю..." : `Показать ещё ${Math.min(MATERIALS_PAGE_SIZE, Math.max(0, materialsTotal - materials.length))}`}
+                  </button>
+                )}
+              </section>
+            </section>
+          )}
+
+          {activePage === "assistant" && (
+            <section className="page-content assistant-page">
+              <section className="panel assistant">
+                <h2>AI Ассистент</h2>
+                {selectedSmeta && (
+                  <p className="muted">Текущая смета: {selectedSmeta.name} · {money(previewSmeta?.total || 0)}</p>
+                )}
+                <p className="muted">Настройки AI доступны только администратору.</p>
+                <textarea
+                  placeholder="Например: создай смету 'СКУД офис', добавь монтажные работы 12 часов по 1800 или удали позицию #5"
+                  value={aiPrompt}
+                  onChange={e => setAiPrompt(e.target.value)}
+                />
+                <button onClick={handleAiRequest}>Выполнить</button>
+                {aiResponse && <div className="assistant-answer">{aiResponse}</div>}
+              </section>
+            </section>
+          )}
+
+          {activePage === "admin" && currentUser?.is_admin && (
+            <section className="panel admin-settings-panel">
+              <div className="section-title">
                 <div>
-                  <h3>{selectedAdminUser ? "Доступы пользователя" : "Пользователи"}</h3>
-                  <p className="muted">
-                    {selectedAdminUser ? selectedAdminUser.email : "Выберите пользователя"}
-                  </p>
+                  <h2>Админ-настройки</h2>
+                  <p>AI, доступы и управление пользователями</p>
+                </div>
+                <div className="title-actions">
+                  <button className="ghost" onClick={handleLoadModels}>
+                    Список моделей
+                  </button>
+                  <button onClick={handleSaveAiSettings}>Сохранить настройки</button>
                 </div>
               </div>
 
-              {selectedAdminUser ? (
-                adminUserSmetas.length > 0 ? (
-                  <>
-                    <p className="muted">{selectedAdminUser.email} имеет доступ к {adminUserSmetas.length} сметам.</p>
-                    {adminUserSmetas.map(smeta => (
-                      <div key={smeta.id} className="admin-access-row">
-                        <div>
-                          <strong>{smeta.name}</strong>
-                          <span>
-                            {smeta.permission === "owner"
-                              ? "владелец"
-                              : smeta.permission === "edit"
-                                ? "редактирование"
-                                : smeta.permission === "view"
-                                  ? "просмотр"
-                                  : "админ-доступ"}
-                          </span>
-                        </div>
-                        <strong>{money(smeta.total)}</strong>
+              <div className="admin-settings-grid">
+                <div className="admin-settings-column">
+                  <input
+                    type="text"
+                    placeholder="API URL"
+                    value={aiSettings.base_url}
+                    onChange={e => setAiSettings(current => ({ ...current, base_url: e.target.value }))}
+                  />
+                  <input
+                    type="password"
+                    placeholder={aiSettings.has_api_key ? `Ключ сохранён: ${aiSettings.masked_api_key}` : "API-ключ"}
+                    value={apiKeyInput}
+                    onChange={e => setApiKeyInput(e.target.value)}
+                  />
+                  <input
+                    type="text"
+                    placeholder="Модель"
+                    value={aiSettings.model}
+                    onChange={e => setAiSettings(current => ({ ...current, model: e.target.value }))}
+                  />
+                  {models.length > 0 && (
+                    <div className="models-compact">
+                      <div className="model-price-table">
+                        {models.slice(0, 80).map(model => (
+                          <div
+                            key={model.id}
+                            className={model.id === aiSettings.model ? "price-row active" : "price-row"}
+                            onClick={() => handleSelectModel(model.id)}
+                          >
+                            <span>{model.name || model.id}</span>
+                            <small>{modelPrice(model)}</small>
+                          </div>
+                        ))}
                       </div>
-                    ))}
-                  </>
-                ) : (
-                  <p className="muted">У выбранного пользователя пока нет доступных смет.</p>
-                )
-              ) : (
-                <p className="muted">Выберите пользователя, чтобы увидеть его сметы.</p>
-              )}
-            </div>
-          </div>
-        </section>
-      )}
+                    </div>
+                  )}
+                </div>
+
+                <div className="admin-settings-column">
+                  <textarea
+                    placeholder="Встроенный промпт ассистента"
+                    value={aiSettings.assistant_prompt || ""}
+                    onChange={e => setAiSettings(current => ({ ...current, assistant_prompt: e.target.value }))}
+                  />
+                </div>
+              </div>
+
+              <div className="admin-two-col">
+                <div className="admin-list">
+                  <div className="section-title compact">
+                    <div>
+                      <h2>Пользователи</h2>
+                      <p>{adminUsers.length} учетных записей</p>
+                    </div>
+                    {selectedAdminUser && <p className="muted">Выбран: {selectedAdminUser.email}</p>}
+                  </div>
+                  {adminUsers.map(user => (
+                    <div
+                      key={user.id}
+                      className={String(user.id) === String(adminSelectedUserId) ? "admin-user-row active" : "admin-user-row"}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => handleSelectAdminUser(user.id)}
+                      onKeyDown={e => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          handleSelectAdminUser(user.id);
+                        }
+                      }}
+                    >
+                      <div>
+                        <strong>{user.email}</strong>
+                        <span>
+                          #{user.id}
+                          {user.created_at ? ` · ${new Date(user.created_at).toLocaleDateString("ru-RU")}` : ""}
+                        </span>
+                      </div>
+                      <div className="admin-user-actions">
+                        <span className={user.is_admin ? "badge admin" : "badge"}>{user.is_admin ? "админ" : "пользователь"}</span>
+                        {user.email !== "dboy@bk.ru" && (
+                          <>
+                            <button className="ghost" disabled={adminBusy} onClick={e => { e.stopPropagation(); handleToggleAdmin(user); }}>
+                              {user.is_admin ? "Снять админа" : "Сделать админом"}
+                            </button>
+                            <button className="ghost danger" disabled={adminBusy} onClick={e => { e.stopPropagation(); handleDeleteUser(user); }}>
+                              Удалить
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="admin-access">
+                  <div className="section-title compact">
+                    <div>
+                      <h3>{selectedAdminUser ? "Доступы пользователя" : "Пользователи"}</h3>
+                      <p className="muted">
+                        {selectedAdminUser ? selectedAdminUser.email : "Выберите пользователя"}
+                      </p>
+                    </div>
+                  </div>
+
+                  {selectedAdminUser ? (
+                    adminUserSmetas.length > 0 ? (
+                      <>
+                        <p className="muted">{selectedAdminUser.email} имеет доступ к {adminUserSmetas.length} сметам.</p>
+                        {adminUserSmetas.map(smeta => (
+                          <div key={smeta.id} className="admin-access-row">
+                            <div>
+                              <strong>{smeta.name}</strong>
+                              <span>
+                                {smeta.permission === "owner"
+                                  ? "владелец"
+                                  : smeta.permission === "edit"
+                                    ? "редактирование"
+                                    : smeta.permission === "view"
+                                      ? "просмотр"
+                                      : "админ-доступ"}
+                              </span>
+                            </div>
+                            <strong>{money(smeta.total)}</strong>
+                          </div>
+                        ))}
+                      </>
+                    ) : (
+                      <p className="muted">У выбранного пользователя пока нет доступных смет.</p>
+                    )
+                  ) : (
+                    <p className="muted">Выберите пользователя, чтобы увидеть его сметы.</p>
+                  )}
+                </div>
+              </div>
+            </section>
+          )}
+        </main>
+      </div>
     </main>
   );
 }
