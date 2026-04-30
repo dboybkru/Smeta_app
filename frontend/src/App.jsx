@@ -47,7 +47,7 @@ const emptySmetaDetails = {
   tax_rate: 0,
   section_adjustments: {},
 };
-const MATERIALS_PAGE_SIZE = 200;
+const MATERIALS_PAGE_SIZE = 500;
 
 function App() {
   const [authToken, setAuthToken] = useState(() => localStorage.getItem("smeta_token") || "");
@@ -380,6 +380,39 @@ function App() {
     setMaterialsLoadingMore(true);
     try {
       await loadMaterials(materialQuery, materialType, materials.length, true);
+    } finally {
+      setMaterialsLoadingMore(false);
+    }
+  };
+
+  const loadAllMaterials = async () => {
+    if (materialsLoadingMore || !materialsHasMore) {
+      return;
+    }
+    setMaterialsLoadingMore(true);
+    try {
+      let loaded = materials.length;
+      let hasMore = materialsHasMore;
+      while (hasMore) {
+        const res = await axios.get(`${API_URL}/materials`, {
+          params: {
+            q: materialQuery,
+            item_type: materialType,
+            category: equipmentCategoryFilter || undefined,
+            technology: technologyFilter,
+            megapixels: megapixelsFilter,
+            price_to: priceToFilter || undefined,
+            limit: MATERIALS_PAGE_SIZE,
+            offset: loaded,
+          },
+        });
+        const payload = normalizeMaterialsResponse(res.data);
+        setMaterials(current => [...current, ...payload.items]);
+        setMaterialsTotal(payload.total);
+        setMaterialsHasMore(payload.has_more);
+        loaded += payload.items.length;
+        hasMore = payload.has_more && payload.items.length > 0;
+      }
     } finally {
       setMaterialsLoadingMore(false);
     }
@@ -1812,9 +1845,14 @@ function App() {
                   ))}
                 </div>
                 {materialsHasMore && (
-                  <button className="ghost load-more" disabled={materialsLoadingMore} onClick={loadMoreMaterials}>
-                    {materialsLoadingMore ? "Загружаю..." : `Показать ещё ${Math.min(MATERIALS_PAGE_SIZE, Math.max(0, materialsTotal - materials.length))}`}
-                  </button>
+                  <div className="load-more-row">
+                    <button className="ghost load-more" disabled={materialsLoadingMore} onClick={loadMoreMaterials}>
+                      {materialsLoadingMore ? "Загружаю..." : `Показать ещё ${Math.min(MATERIALS_PAGE_SIZE, Math.max(0, materialsTotal - materials.length))}`}
+                    </button>
+                    <button className="ghost load-more" disabled={materialsLoadingMore} onClick={loadAllMaterials}>
+                      Показать все {Math.max(0, materialsTotal - materials.length)}
+                    </button>
+                  </div>
                 )}
               </section>
             </section>

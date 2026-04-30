@@ -2534,7 +2534,18 @@ def read_materials(
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
-    fetch_limit = 5000 if (category or technology or megapixels or price_to is not None) else max(limit + offset, limit)
+    has_post_filters = bool(category or technology or megapixels or price_to is not None)
+    if not has_post_filters:
+        page, total = get_materials(db, q, item_type, limit=limit, offset=offset, return_total=True)
+        return {
+            "items": [material_to_dict(material) for material in page],
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "has_more": offset + limit < total,
+        }
+
+    fetch_limit = 50000
     rows = get_materials(db, q, item_type, limit=fetch_limit)
     rows = [material for material in rows if material_matches_category(material, category)]
     rows = filter_materials(rows, technology, megapixels, price_to)

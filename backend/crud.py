@@ -242,6 +242,14 @@ def get_materials(db, q="", item_type="", limit=200, offset=0, return_total=Fals
             query = query.filter(or_(*clauses))
     if item_type and item_type != "all":
         query = query.filter(Material.item_type == item_type)
+    offset = max(0, int(offset or 0))
+    limit = max(1, int(limit or 200))
+    if not q:
+        total = query.count()
+        rows = query.order_by(Material.name).offset(offset).limit(limit).all()
+        if return_total:
+            return rows, total
+        return rows
     rows = query.order_by(Material.name).limit(max(limit * 25, 5000)).all()
     if q:
         groups = expanded_query_groups(q)
@@ -260,7 +268,6 @@ def get_materials(db, q="", item_type="", limit=200, offset=0, return_total=Fals
             ),
         )
     total = len(rows)
-    offset = max(0, int(offset or 0))
     page = rows[offset : offset + limit]
     if return_total:
         return page, total

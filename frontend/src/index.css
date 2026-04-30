@@ -594,6 +594,17 @@ h2 {
   width: 100%;
 }
 
+.load-more-row {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 1fr 1fr;
+  margin-top: 12px;
+}
+
+.load-more-row .load-more {
+  margin-top: 0;
+}
+
 .material-row {
   align-items: center;
   background: #f7f9fb;
